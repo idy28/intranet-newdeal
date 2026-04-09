@@ -1,53 +1,76 @@
-name: 🔧 CI Évolué - New Deal Technologique
+name: CI Evolue - New Deal Technologique
 
 on:
   push:
     branches:
       - dev
+  pull_request:
+    branches:
+      - dev
 
 env:
   IMAGE_NAME: ${{ secrets.DOCKERHUB_USERNAME }}/intranet-newdeal
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
+  # ════════════════════════════════════════════════
+  # JOB 1 : BUILD AVEC IMAGE SLIM
+  # ════════════════════════════════════════════════
   build:
-    name: 🐳 Build Image Slim
+    name: Build Image nginx alpine3.23-slim
     runs-on: ubuntu-latest
 
     steps:
-      - name: 📥 Checkout du code
+      - name: Checkout du code
         uses: actions/checkout@v4
 
-      # ⚡ IMAGE MODIFIÉE : nginx:alpine3.23-slim
-      - name: 🔨 Build avec nginx:alpine3.23-slim
+      - name: Remplacer l image par la version slim
         run: |
-          sed -i 's|FROM nginx:alpine3.23|FROM nginx:alpine3.23-slim|g' Dockerfile
-          docker build -t ${{ env.IMAGE_NAME }}:slim .
+          sed -i 's|FROM nginx:alpine3.23$|FROM nginx:alpine3.23-slim|g' Dockerfile
+          echo "Image utilisee :"
+          head -3 Dockerfile
 
-      - name: 💾 Sauvegarder l'image
+      - name: Build de l image slim
+        run: |
+          docker build \
+            -t ${{ env.IMAGE_NAME }}:slim \
+            -t ${{ env.IMAGE_NAME }}:${{ github.sha }}-slim \
+            .
+
+      - name: Afficher la taille de l image
+        run: docker images ${{ env.IMAGE_NAME }}
+
+      - name: Sauvegarder l image slim
         run: docker save ${{ env.IMAGE_NAME }}:slim -o intranet-slim.tar
 
-      - name: 📤 Upload artifact
+      - name: Upload artifact slim
         uses: actions/upload-artifact@v4
         with:
           name: docker-image-slim
           path: intranet-slim.tar
+          retention-days: 1
 
+  # ════════════════════════════════════════════════
+  # JOB 2 : SCAN + BLOCAGE SI CRITICAL
+  # ════════════════════════════════════════════════
   security-scan:
-    name: 🔒 Scan + Blocage si CRITICAL
+    name: Scan Securite - Bloque si CRITICAL
     runs-on: ubuntu-latest
     needs: build
 
     steps:
-      - name: 📥 Download artifact
+      - name: Checkout du code
+        uses: actions/checkout@v4
+
+      - name: Download artifact slim
         uses: actions/download-artifact@v4
         with:
           name: docker-image-slim
 
-      - name: 🔄 Charger l'image
+      - name: Charger l image Docker
         run: docker load -i intranet-slim.tar
 
-      # 🚨 BLOQUE si vulnérabilité CRITICAL détectée
-      - name: 🛡️ Scan Trivy - BLOQUE si CRITICAL
+      - name: Scan Trivy - BLOQUE si vulnerabilite CRITICAL
         uses: aquasecurity/trivy-action@master
         with:
           image-ref: ${{ env.IMAGE_NAME }}:slim
@@ -56,82 +79,101 @@ jobs:
           severity: "CRITICAL"
           ignore-unfixed: false
 
-      - name: 🔍 Scan secrets Gitleaks
+      - name: Scan secrets avec Gitleaks
         uses: gitleaks/gitleaks-action@v2
+        continue-on-error: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: true
+          GITLEAKS_ENABLE_SUMMARY: true
 
+  # ════════════════════════════════════════════════
+  # JOB 3 : PUSH VERS DOCKER HUB
+  # ════════════════════════════════════════════════
   push:
-    name: 🚀 Push Docker Hub
+    name: Push Image Slim vers Docker Hub
     runs-on: ubuntu-latest
     needs: security-scan
 
     steps:
-      - name: 📥 Download artifact
+      - name: Download artifact slim
         uses: actions/download-artifact@v4
         with:
           name: docker-image-slim
 
-      - name: 🔄 Charger l'image
+      - name: Charger l image Docker
         run: docker load -i intranet-slim.tar
 
-      - name: 🔐 Connexion Docker Hub
+      - name: Connexion Docker Hub
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: 📤 Push image slim
-        run: docker push ${{ env.IMAGE_NAME }}:slim
+      - name: Push image slim
+        run: |
+          docker push ${{ env.IMAGE_NAME }}:slim
+          docker tag ${{ env.IMAGE_NAME }}:slim \
+                     ${{ env.IMAGE_NAME }}:${{ github.sha }}-slim
+          docker push ${{ env.IMAGE_NAME }}:${{ github.sha }}-slim
 
-  # ══════════════════════════════════════════
-  # NOTIFICATION EMAIL (succès ou échec)
-  # ══════════════════════════════════════════
+  # ════════════════════════════════════════════════
+  # JOB 4 : NOTIFICATION EMAIL
+  # ════════════════════════════════════════════════
   notify:
-    name: 📧 Notification Email
+    name: Notification Email
     runs-on: ubuntu-latest
     needs: [build, security-scan, push]
     if: always()
 
     steps:
-      - name: 📧 Email de succès
+      - name: Email de succes
         if: ${{ needs.push.result == 'success' }}
         uses: dawidd6/action-send-mail@v3
         with:
           server_address: smtp.gmail.com
           server_port: 465
+          secure: true
           username: ${{ secrets.MAIL_USERNAME }}
           password: ${{ secrets.MAIL_PASSWORD }}
-          subject: "✅ [New Deal] Pipeline CI réussi - ${{ github.ref_name }}"
+          subject: "[New Deal] Pipeline CI SUCCES - ${{ github.ref_name }}"
           to: ${{ secrets.NOTIFY_EMAIL }}
-          from: "CI/CD New Deal Technologique"
+          from: "CI/CD New Deal <${{ secrets.MAIL_USERNAME }}>"
           body: |
-            ✅ Le pipeline CI s'est exécuté avec succès !
+            Pipeline CI execute avec succes.
 
-            📁 Repository : ${{ github.repository }}
-            🌿 Branche    : ${{ github.ref_name }}
-            👤 Auteur     : ${{ github.actor }}
-            🔗 Commit     : ${{ github.sha }}
+            Repository : ${{ github.repository }}
+            Branche    : ${{ github.ref_name }}
+            Auteur     : ${{ github.actor }}
+            Commit     : ${{ github.sha }}
 
-            L'image Docker a été publiée sur Docker Hub.
+            Image publiee : ${{ secrets.DOCKERHUB_USERNAME }}/intranet-newdeal:slim
 
-      - name: 📧 Email d'échec
-        if: ${{ needs.push.result != 'success' }}
+            Logs : https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+      - name: Email d echec
+        if: ${{ needs.push.result != 'success' || needs.security-scan.result == 'failure' }}
         uses: dawidd6/action-send-mail@v3
         with:
           server_address: smtp.gmail.com
           server_port: 465
+          secure: true
           username: ${{ secrets.MAIL_USERNAME }}
           password: ${{ secrets.MAIL_PASSWORD }}
-          subject: "❌ [New Deal] Pipeline CI ÉCHOUÉ - ${{ github.ref_name }}"
+          subject: "[New Deal] Pipeline CI ECHEC - ${{ github.ref_name }}"
           to: ${{ secrets.NOTIFY_EMAIL }}
-          from: "CI/CD New Deal Technologique"
+          from: "CI/CD New Deal <${{ secrets.MAIL_USERNAME }}>"
           body: |
-            ❌ Le pipeline CI a échoué !
+            ALERTE : Le pipeline CI a echoue.
 
-            📁 Repository : ${{ github.repository }}
-            🌿 Branche    : ${{ github.ref_name }}
-            👤 Auteur     : ${{ github.actor }}
-            🔗 Commit     : ${{ github.sha }}
+            Repository : ${{ github.repository }}
+            Branche    : ${{ github.ref_name }}
+            Auteur     : ${{ github.actor }}
+            Commit     : ${{ github.sha }}
 
-            Veuillez vérifier les logs GitHub Actions.
+            Statut des jobs :
+            - Build         : ${{ needs.build.result }}
+            - Scan securite : ${{ needs.security-scan.result }}
+            - Push          : ${{ needs.push.result }}
+
+            Logs : https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
